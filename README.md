@@ -2,6 +2,8 @@
 
 lazytodo is a terminal todo manager for Markdown checkbox lists. It lets you navigate, toggle, and edit tasks inside a TUI powered by Bubble Tea.
 
+![Screenshot of lazytodo TUI](example.png)
+
 ## Build
 
 ```bash
