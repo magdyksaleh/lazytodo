@@ -1,4 +1,4 @@
-module github.com/magdy/fawkes/todui
+module github.com/magdy/fawkes/lazytodo
 
 go 1.24.0
 

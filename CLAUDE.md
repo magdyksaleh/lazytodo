@@ -4,16 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-todui is a terminal-based todo list manager for markdown checkbox files. It provides a TUI (Terminal User Interface) using the Bubble Tea framework to interactively manage tasks in markdown files that use the `- [ ]` / `- [x]` checkbox format.
+lazytodo is a terminal-based todo list manager for markdown checkbox files. It provides a TUI (Terminal User Interface) using the Bubble Tea framework to interactively manage tasks in markdown files that use the `- [ ]` / `- [x]` checkbox format.
 
 ## Build and Run Commands
 
 ```bash
 # Build the binary
-go build -o todui .
+go build -o lazytodo .
 
 # Run the application
-./todui <path-to-todo.md>
+./lazytodo <path-to-todo.md>
 
 # Run tests (none currently exist)
 go test ./...

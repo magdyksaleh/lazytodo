@@ -556,7 +556,7 @@ func (m model) startExternalEdit() (tea.Model, tea.Cmd) {
 	m.externalEditIdx = m.cursor
 
 	// Create temp file with the task text
-	tmpFile, err := os.CreateTemp("", "todui-edit-*.txt")
+	tmpFile, err := os.CreateTemp("", "lazytodo-edit-*.txt")
 	if err != nil {
 		m.err = err
 		return m, nil
@@ -1045,7 +1045,7 @@ func (m model) normalizeSelection() model {
 func main() {
 	flag.Parse()
 	if flag.NArg() == 0 {
-		fmt.Println("usage: todui <path-to-todo.md>")
+		fmt.Println("usage: lazytodo <path-to-todo.md>")
 		os.Exit(1)
 	}
 	path := flag.Arg(0)
