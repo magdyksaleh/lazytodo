@@ -20,3 +20,5 @@ Thumbs.db
 coverage.out
 
 lazytodo.log
+
+.claude/
