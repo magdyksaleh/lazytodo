@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -18,15 +19,22 @@ import (
 )
 
 var logger *slog.Logger
+var loggingOn bool
 
-func initLogger() error {
+func initLogger() {
+	if !loggingOn {
+		// No-op logger that discards all output
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		return
+	}
 	f, err := os.OpenFile("lazytodo.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to open log file: %v", err)
+		fmt.Println("warning: failed to open log file:", err)
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		return
 	}
 	logger = slog.New(slog.NewJSONHandler(f, nil))
 	logger.Info("Logger initialized")
-	return nil
 }
 
 var checkboxPattern = regexp.MustCompile(`^(\s*)([-*])\s+\[([ xX])\]\s*(.*)$`)
@@ -1122,10 +1130,9 @@ func (m model) normalizeSelection() model {
 }
 
 func main() {
-	if err := initLogger(); err != nil {
-		fmt.Println("warning: failed to init logger:", err)
-	}
+	flag.BoolVar(&loggingOn, "logs", false, "enable debug logging to lazytodo.log")
 	flag.Parse()
+	initLogger()
 	path := ""
 	if flag.NArg() == 0 {
 		// Use todo.md but don't create it yet - will be created lazily on first action
