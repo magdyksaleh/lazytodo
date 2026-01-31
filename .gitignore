@@ -18,3 +18,5 @@ Thumbs.db
 # Test artifacts
 *.test
 coverage.out
+
+lazytodo.log
