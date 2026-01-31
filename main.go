@@ -483,10 +483,10 @@ func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m = m.normalizeSelection()
 			return m, nil
 		}
-		
+
 		// Apply the current edit
 		m = m.applyCurrentEdit(rawValue)
-		
+
 		// Save to disk
 		modTime, err := saveTasks(m.filePath, m.tasks)
 		if err != nil {
@@ -495,7 +495,7 @@ func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.lastModifiedAt = modTime
 			m.err = nil
 		}
-		
+
 		// Start new task below current position
 		m.insertIndex = m.cursor + 1
 		m.editIndex = m.insertIndex
