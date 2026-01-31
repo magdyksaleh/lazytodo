@@ -150,11 +150,13 @@ main() {
   resolve_install_dir
   select_checksum_tool
 
-  local tmp_dir archive_name archive_url archive_path checksums_url checksums_path extract_dir bin_path
+  local tmp_dir archive_name archive_url archive_path checksums_url checksums_path extract_dir bin_path version_no_v
   tmp_dir=$(mktemp -d)
-  trap 'rm -rf "$tmp_dir"' EXIT
+  trap "rm -rf '$tmp_dir'" EXIT
 
-  archive_name="${BINARY_NAME}_${VERSION}_${OS}_${ARCH}.tar.gz"
+  # Strip the 'v' prefix for the archive filename (files use 0.1.0, not v0.1.0)
+  version_no_v="${VERSION#v}"
+  archive_name="${BINARY_NAME}_${version_no_v}_${OS}_${ARCH}.tar.gz"
   archive_url="${DOWNLOAD_ROOT}/download/${VERSION}/${archive_name}"
   archive_path="${tmp_dir}/${archive_name}"
   checksums_url="${DOWNLOAD_ROOT}/download/${VERSION}/checksums.txt"

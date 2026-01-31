@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 )
+
+var logger *slog.Logger
+
+func initLogger() error {
+	f, err := os.OpenFile("lazytodo.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %v", err)
+	}
+	logger = slog.New(slog.NewJSONHandler(f, nil))
+	logger.Info("Logger initialized")
+	return nil
+}
 
 var checkboxPattern = regexp.MustCompile(`^(\s*)([-*])\s+\[([ xX])\]\s*(.*)$`)
 
@@ -71,6 +84,7 @@ type undoState struct {
 
 const maxUndoHistory = 10
 
+// Model is the central application state
 type model struct {
 	filePath        string
 	tasks           []task
@@ -94,7 +108,7 @@ type model struct {
 	externalEditIdx int
 	undoStack       []undoState
 	redoStack       []undoState
-	pendingD        bool // waiting for second 'd' in 'dd' command
+	pendingD        bool
 }
 
 func newModel(path string) (model, error) {
@@ -201,10 +215,13 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	logger.Debug("Update called", "msg_type", fmt.Sprintf("%T", msg))
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		logger.Debug("KeyMsg received", "key", msg.String())
 		return m.handleKey(msg)
 	case tea.WindowSizeMsg:
+		logger.Debug("WindowSizeMsg received", "width", msg.Width, "height", msg.Height)
 		if msg.Width > 0 {
 			m.windowWidth = msg.Width
 		}
@@ -217,13 +234,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case fileCheckMsg:
+		logger.Debug("FileCheckMsg received", "time", time.Time(msg))
 		var cmds []tea.Cmd
 		m = m.handleFileCheck()
 		cmds = append(cmds, watchFileCmd())
 		return m, tea.Batch(cmds...)
 	case editorFinishedMsg:
+		logger.Debug("EditorFinishedMsg received", "error", msg.err)
 		return m.handleEditorFinished(msg)
 	}
+	logger.Debug("Update returning nil")
 	return m, nil
 }
 
@@ -1043,12 +1063,24 @@ func (m model) normalizeSelection() model {
 }
 
 func main() {
-	flag.Parse()
-	if flag.NArg() == 0 {
-		fmt.Println("usage: lazytodo <path-to-todo.md>")
-		os.Exit(1)
+	if err := initLogger(); err != nil {
+		fmt.Println("warning: failed to init logger:", err)
 	}
-	path := flag.Arg(0)
+	flag.Parse()
+	path := ""
+	if flag.NArg() == 0 {
+		// Create a new file called todo.md in the current directory or find an existing one
+		path = "todo.md"
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			_, err := os.Create(path)
+			if err != nil {
+				fmt.Println("error: failed to create todo.md:", err)
+				os.Exit(1)
+			}
+		}
+	} else {
+		path = flag.Arg(0)
+	}
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		fmt.Printf("file %s does not exist\n", path)
 		os.Exit(1)

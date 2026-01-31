@@ -23,7 +23,13 @@ go build -o lazytodo .
 ## Run
 
 ```bash
+# Run with a specific file
 ./lazytodo path/to/todo.md
+
+# Run without arguments - creates/opens todo.md in current directory
+./lazytodo
 ```
+
+If you run `lazytodo` without arguments, it will automatically create a `todo.md` file in the current directory if one doesn't already exist.
 
 The application edits the file in place and supports both inline and external editing.
