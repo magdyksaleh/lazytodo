@@ -156,6 +156,10 @@ func defaultTaskTemplate(tasks []task) task {
 
 func loadTasks(path string) ([]task, time.Time, error) {
 	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		// File doesn't exist yet - return empty tasks, will be created on first save
+		return []task{}, time.Time{}, nil
+	}
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -249,6 +253,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) handleFileCheck() model {
 	info, err := os.Stat(m.filePath)
+	if errors.Is(err, os.ErrNotExist) {
+		// File hasn't been created yet, nothing to reload
+		return m
+	}
 	if err != nil {
 		m.err = err
 		return m
@@ -433,16 +441,60 @@ func getIndentLevel(indent string) int {
 func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
+		// Save current edit and exit edit mode (Obsidian-style)
+		rawValue := m.textInput.Value()
+		if strings.TrimSpace(rawValue) != "" {
+			m = m.applyCurrentEdit(rawValue)
+			modTime, err := saveTasks(m.filePath, m.tasks)
+			if err != nil {
+				m.err = err
+			} else {
+				m.lastModifiedAt = modTime
+				m.statusMessage = "Saved"
+				m.err = nil
+			}
+		}
 		m.mode = modeNormal
-		m.statusMessage = "Edit canceled"
 		m.editIntent = editIntentNone
 		m.pendingReload = false
 		m.editIndex = -1
 		m.textInput.Reset()
 		m.textInput.Blur()
+		m = m.normalizeSelection()
 		return m, nil
 	case tea.KeyEnter:
-		return m.finishEdit()
+		// Save current task and create new one below (Obsidian-style)
+		rawValue := m.textInput.Value()
+		if strings.TrimSpace(rawValue) == "" {
+			// Empty task - just exit edit mode, don't save empty
+			m.mode = modeNormal
+			m.editIntent = editIntentNone
+			m.textInput.Reset()
+			m.textInput.Blur()
+			m.editIndex = -1
+			m = m.normalizeSelection()
+			return m, nil
+		}
+		
+		// Apply the current edit
+		m = m.applyCurrentEdit(rawValue)
+		
+		// Save to disk
+		modTime, err := saveTasks(m.filePath, m.tasks)
+		if err != nil {
+			m.err = err
+		} else {
+			m.lastModifiedAt = modTime
+			m.err = nil
+		}
+		
+		// Start new task below current position
+		m.insertIndex = m.cursor + 1
+		m.editIndex = m.insertIndex
+		m.editIntent = editIntentInsert
+		m.textInput.SetValue("")
+		// Keep focus, stay in edit mode
+		return m, nil
 	case tea.KeyTab:
 		m = m.changeIndent(1)
 		return m, nil
@@ -516,19 +568,16 @@ func (m model) deleteCurrentTask() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) finishEdit() (tea.Model, tea.Cmd) {
-	rawValue := m.textInput.Value()
-	if strings.TrimSpace(rawValue) == "" {
-		m.statusMessage = "Cannot save empty task"
-		return m, nil
-	}
-	value := rawValue
+// applyCurrentEdit applies the current edit to the model without saving or exiting edit mode
+func (m model) applyCurrentEdit(value string) model {
 	switch m.editIntent {
 	case editIntentUpdate:
 		if len(m.tasks) == 0 {
-			break
+			return m
 		}
-		m.tasks[m.cursor].Text = value
+		if m.editIndex >= 0 && m.editIndex < len(m.tasks) {
+			m.tasks[m.editIndex].Text = value
+		}
 	case editIntentInsert:
 		newTask := task{
 			Indent:    m.editTemplate.Indent,
@@ -548,6 +597,16 @@ func (m model) finishEdit() (tea.Model, tea.Cmd) {
 		m.tasks = append(m.tasks[:m.insertIndex], append([]task{newTask}, m.tasks[m.insertIndex:]...)...)
 		m.cursor = m.insertIndex
 	}
+	return m
+}
+
+func (m model) finishEdit() (tea.Model, tea.Cmd) {
+	rawValue := m.textInput.Value()
+	if strings.TrimSpace(rawValue) == "" {
+		m.statusMessage = "Cannot save empty task"
+		return m, nil
+	}
+	m = m.applyCurrentEdit(rawValue)
 	modTime, err := saveTasks(m.filePath, m.tasks)
 	if err != nil {
 		m.err = err
@@ -853,7 +912,7 @@ func (m model) renderFooter() string {
 
 	var parts []string
 	if m.mode == modeEdit {
-		parts = append(parts, "Tab/S-Tab indent", "Esc cancel", "Enter save")
+		parts = append(parts, "Tab/S-Tab indent", "Esc save & exit", "Enter new below")
 	} else {
 		parts = append(parts, "j/k move", "space toggle", "dd del", "u undo", "^r redo", "e vim", "i inline", "o/O new", "q quit")
 		if m.selectionActive {
@@ -1069,24 +1128,18 @@ func main() {
 	flag.Parse()
 	path := ""
 	if flag.NArg() == 0 {
-		// Create a new file called todo.md in the current directory or find an existing one
+		// Use todo.md but don't create it yet - will be created lazily on first action
 		path = "todo.md"
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			_, err := os.Create(path)
-			if err != nil {
-				fmt.Println("error: failed to create todo.md:", err)
-				os.Exit(1)
-			}
-		}
 	} else {
 		path = flag.Arg(0)
-	}
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		fmt.Printf("file %s does not exist\n", path)
-		os.Exit(1)
-	} else if err != nil {
-		fmt.Println("error: ", err)
-		os.Exit(1)
+		// For explicit paths, still error if missing
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			fmt.Printf("file %s does not exist\n", path)
+			os.Exit(1)
+		} else if err != nil {
+			fmt.Println("error: ", err)
+			os.Exit(1)
+		}
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
