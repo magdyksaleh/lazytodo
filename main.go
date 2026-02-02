@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -38,8 +39,16 @@ func initLogger() {
 }
 
 var checkboxPattern = regexp.MustCompile(`^(\s*)([-*])\s+\[([ xX])\]\s*(.*)$`)
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-const fileCheckInterval = time.Second
+const (
+	fileCheckInterval  = time.Second
+	defaultInputWidth  = 60
+	minInputWidth      = 20
+	wrapMargin         = 6
+	editorWidthPadding = 10
+	defaultWindowWidth = 80
+)
 
 type mode int
 
@@ -128,7 +137,7 @@ func newModel(path string) (model, error) {
 	ti.CharLimit = 0
 	ti.Placeholder = "Describe the task"
 	ti.Prompt = ""
-	ti.Width = 60
+	ti.Width = defaultInputWidth
 	rend, err := newMarkdownRenderer(0)
 	if err != nil {
 		return model{}, err
@@ -149,7 +158,7 @@ func newModel(path string) (model, error) {
 		selectionAnchor: 0,
 		renderer:        rend,
 		rendererWidth:   0,
-		windowWidth:     80,
+		windowWidth:     defaultWindowWidth,
 		windowHeight:    0,
 		externalEditIdx: -1,
 	}, nil
@@ -214,6 +223,18 @@ func saveTasks(path string, tasks []task) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return info.ModTime(), nil
+}
+
+// saveAndSetStatus saves tasks to disk and updates model status accordingly
+func (m *model) saveAndSetStatus(msg string) {
+	modTime, err := saveTasks(m.filePath, m.tasks)
+	if err != nil {
+		m.err = err
+		return
+	}
+	m.lastModifiedAt = modTime
+	m.statusMessage = msg
+	m.err = nil
 }
 
 func watchFileCmd() tea.Cmd {
@@ -342,24 +363,12 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "u":
 		m = m.undo()
 		if m.statusMessage == "Undo" {
-			modTime, err := saveTasks(m.filePath, m.tasks)
-			if err != nil {
-				m.err = err
-			} else {
-				m.lastModifiedAt = modTime
-				m.err = nil
-			}
+			m.saveAndSetStatus("Undo")
 		}
 	case "ctrl+r":
 		m = m.redo()
 		if m.statusMessage == "Redo" {
-			modTime, err := saveTasks(m.filePath, m.tasks)
-			if err != nil {
-				m.err = err
-			} else {
-				m.lastModifiedAt = modTime
-				m.err = nil
-			}
+			m.saveAndSetStatus("Redo")
 		}
 	case "enter", " ":
 		if len(m.tasks) == 0 {
@@ -379,21 +388,14 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.tasks[m.cursor].Completed = !m.tasks[m.cursor].Completed
 			count = 1
 		}
-		modTime, err := saveTasks(m.filePath, m.tasks)
-		if err != nil {
-			m.err = err
-		} else {
-			m.lastModifiedAt = modTime
-			if count == 1 {
-				state := "Incomplete"
-				if m.tasks[m.cursor].Completed {
-					state = "Completed"
-				}
-				m.statusMessage = fmt.Sprintf("Marked %s", state)
-			} else {
-				m.statusMessage = fmt.Sprintf("Toggled %d tasks", count)
+		if count == 1 {
+			state := "Incomplete"
+			if m.tasks[m.cursor].Completed {
+				state = "Completed"
 			}
-			m.err = nil
+			m.saveAndSetStatus(fmt.Sprintf("Marked %s", state))
+		} else {
+			m.saveAndSetStatus(fmt.Sprintf("Toggled %d tasks", count))
 		}
 	case "V", "shift+v":
 		if len(m.tasks) == 0 {
@@ -453,19 +455,14 @@ func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		rawValue := m.textInput.Value()
 		if strings.TrimSpace(rawValue) != "" {
 			m = m.applyCurrentEdit(rawValue)
-			modTime, err := saveTasks(m.filePath, m.tasks)
-			if err != nil {
-				m.err = err
-			} else {
-				m.lastModifiedAt = modTime
-				m.statusMessage = "Saved"
-				m.err = nil
-			}
+			m.saveAndSetStatus("Saved")
 		}
 		m.mode = modeNormal
 		m.editIntent = editIntentNone
 		m.pendingReload = false
 		m.editIndex = -1
+		// Clamp cursor in case we were inserting at the end and cancelled.
+		m.cursor = clampCursor(m.cursor, len(m.tasks))
 		m.textInput.Reset()
 		m.textInput.Blur()
 		m = m.normalizeSelection()
@@ -480,6 +477,8 @@ func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.textInput.Reset()
 			m.textInput.Blur()
 			m.editIndex = -1
+			// Clamp cursor if insert was canceled at end-of-list.
+			m.cursor = clampCursor(m.cursor, len(m.tasks))
 			m = m.normalizeSelection()
 			return m, nil
 		}
@@ -488,18 +487,14 @@ func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m = m.applyCurrentEdit(rawValue)
 
 		// Save to disk
-		modTime, err := saveTasks(m.filePath, m.tasks)
-		if err != nil {
-			m.err = err
-		} else {
-			m.lastModifiedAt = modTime
-			m.err = nil
-		}
+		m.saveAndSetStatus("")
 
 		// Start new task below current position
 		m.insertIndex = m.cursor + 1
 		m.editIndex = m.insertIndex
 		m.editIntent = editIntentInsert
+		// Keep cursor aligned with the insert line.
+		m.cursor = m.editIndex
 		m.textInput.SetValue("")
 		// Keep focus, stay in edit mode
 		return m, nil
@@ -564,14 +559,7 @@ func (m model) deleteCurrentTask() (tea.Model, tea.Cmd) {
 	m.cursor = clampCursor(m.cursor, len(m.tasks))
 
 	// Save to file
-	modTime, err := saveTasks(m.filePath, m.tasks)
-	if err != nil {
-		m.err = err
-	} else {
-		m.lastModifiedAt = modTime
-		m.statusMessage = "Deleted task"
-		m.err = nil
-	}
+	m.saveAndSetStatus("Deleted task")
 
 	return m, nil
 }
@@ -593,16 +581,8 @@ func (m model) applyCurrentEdit(value string) model {
 			Completed: false,
 			Text:      value,
 		}
-		if m.insertIndex < 0 || m.insertIndex > len(m.tasks) {
-			m.insertIndex = len(m.tasks)
-		}
-		if m.insertIndex < 0 {
-			m.insertIndex = 0
-		}
-		if m.insertIndex > len(m.tasks) {
-			m.insertIndex = len(m.tasks)
-		}
-		m.tasks = append(m.tasks[:m.insertIndex], append([]task{newTask}, m.tasks[m.insertIndex:]...)...)
+		m.insertIndex = clampIndex(m.insertIndex, len(m.tasks))
+		m.tasks = slices.Insert(m.tasks, m.insertIndex, newTask)
 		m.cursor = m.insertIndex
 	}
 	return m
@@ -615,14 +595,7 @@ func (m model) finishEdit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m = m.applyCurrentEdit(rawValue)
-	modTime, err := saveTasks(m.filePath, m.tasks)
-	if err != nil {
-		m.err = err
-	} else {
-		m.lastModifiedAt = modTime
-		m.statusMessage = "Saved"
-		m.err = nil
-	}
+	m.saveAndSetStatus("Saved")
 	m.mode = modeNormal
 	m.editIntent = editIntentNone
 	m.textInput.Reset()
@@ -697,14 +670,7 @@ func (m model) handleEditorFinished(msg editorFinishedMsg) (tea.Model, tea.Cmd) 
 	// Update the task
 	if m.externalEditIdx >= 0 && m.externalEditIdx < len(m.tasks) {
 		m.tasks[m.externalEditIdx].Text = newText
-		modTime, err := saveTasks(m.filePath, m.tasks)
-		if err != nil {
-			m.err = err
-		} else {
-			m.lastModifiedAt = modTime
-			m.statusMessage = "Saved"
-			m.err = nil
-		}
+		m.saveAndSetStatus("Saved")
 	}
 
 	m.externalEditIdx = -1
@@ -741,6 +707,8 @@ func (m model) startInsertAt(index int) model {
 		m.insertIndex = clampIndex(index, len(m.tasks))
 	}
 	m.editIndex = m.insertIndex
+	// Move cursor to the insert line so the highlight reflects the edit focus.
+	m.cursor = m.editIndex
 	m.textInput.SetValue("")
 	m.textInput.Focus()
 	m = m.applyEditorWidth()
@@ -757,25 +725,26 @@ func (m model) View() string {
 		b.WriteString("No tasks found. Press 'o' to create one.\n")
 	}
 	total := len(m.tasks)
-	for i := 0; i <= total; i++ {
+	for i := 0; i < total; i++ {
+		// Render a phantom insert row before the real task so it doesn't get hidden.
 		if m.mode == modeEdit && m.editIntent == editIntentInsert && i == m.editIndex {
 			b.WriteString(m.renderEditorLine(m.editTemplate, i))
-			continue
-		}
-		if i == total {
-			break
 		}
 		if m.mode == modeEdit && m.editIntent == editIntentUpdate && i == m.editIndex {
 			b.WriteString(m.renderEditorLine(m.tasks[i], i))
 			continue
 		}
-		b.WriteString(m.renderTaskLine(m.tasks[i], i))
+		suppressCursor := m.mode == modeEdit && m.editIntent == editIntentInsert && i == m.editIndex
+		b.WriteString(m.renderTaskLine(m.tasks[i], i, suppressCursor))
+	}
+	if m.mode == modeEdit && m.editIntent == editIntentInsert && m.editIndex == total {
+		b.WriteString(m.renderEditorLine(m.editTemplate, m.editIndex))
 	}
 	b.WriteString(m.renderFooter())
 	return m.padViewToWindow(b.String())
 }
 
-func (m model) renderTaskLine(t task, index int) string {
+func (m model) renderTaskLine(t task, index int, suppressCursor bool) string {
 	body := m.renderMarkdownLine(t.Text)
 	indent := strings.ReplaceAll(t.Indent, "\t", "    ")
 	checkbox := m.checkboxSymbol(t.Completed)
@@ -797,14 +766,14 @@ func (m model) renderTaskLine(t task, index int) string {
 		}
 		rendered.WriteString(line)
 	}
-	return m.formatLine(index, false, rendered.String())
+	return m.formatLine(index, false, suppressCursor, rendered.String())
 }
 
 func (m model) renderEditorLine(t task, index int) string {
 	indent := strings.ReplaceAll(t.Indent, "\t", "    ")
 	prefix := fmt.Sprintf("%s%s ", indent, m.checkboxSymbol(t.Completed))
 	content := prefix + m.textInput.View()
-	return m.formatLine(index, true, content)
+	return m.formatLine(index, true, false, content)
 }
 
 func (m model) renderMarkdownLine(raw string) string {
@@ -851,11 +820,11 @@ const (
 	clearToEOL   = "\033[K"                 // Clear from cursor to end of line (fills with current bg)
 )
 
-func (m model) formatLine(index int, editing bool, body string) string {
+func (m model) formatLine(index int, editing bool, suppressCursor bool, body string) string {
 	cursorChar := " "
 	if editing {
 		cursorChar = ">"
-	} else if index == m.cursor {
+	} else if !suppressCursor && index == m.cursor {
 		cursorChar = ">"
 	}
 	isSelected := !editing && m.isSelected(index)
@@ -900,8 +869,7 @@ func (m model) formatLine(index int, editing bool, body string) string {
 
 // stripANSI removes ANSI escape codes from a string
 func stripANSI(s string) string {
-	ansiEscape := regexp.MustCompile(`\x1b\[[0-9;]*m`)
-	return ansiEscape.ReplaceAllString(s, "")
+	return ansiEscapePattern.ReplaceAllString(s, "")
 }
 
 func (m model) renderHeader() string {
@@ -939,20 +907,6 @@ func (m model) renderFooter() string {
 		status += "\nError: " + m.err.Error()
 	}
 	return "\n" + status + "\n"
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func clampCursor(cursor int, length int) int {
@@ -1056,7 +1010,7 @@ func newMarkdownRenderer(width int) (*glamour.TermRenderer, error) {
 }
 
 func (m model) ensureRendererWidth(totalWidth int) model {
-	wrap := totalWidth - 6
+	wrap := totalWidth - wrapMargin
 	if wrap < 0 {
 		wrap = 0
 	}
@@ -1077,9 +1031,9 @@ func (m model) applyEditorWidth() model {
 	if m.windowWidth <= 0 {
 		return m
 	}
-	width := m.windowWidth - 10
-	if width < 20 {
-		width = 20
+	width := m.windowWidth - editorWidthPadding
+	if width < minInputWidth {
+		width = minInputWidth
 	}
 	m.textInput.Width = width
 	return m

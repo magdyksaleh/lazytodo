@@ -1,3 +1,4 @@
-- [ ] Add priotrities to the todos (maybe later)
-- [ ] Fix cursor bug when creating a new task. Cursor stays on old task when you hit o
-- [ ] Fix bug where when u hit o it overwrites the line below it while your editing
+- [x] Fix cursor bug when creating a new task. Cursor stays on old task when you hit o
+- [x] Fix bug where when u hit o it overwrites the line below it while your editing
+- [ ] Add priority function
+- [ ] Shit-h should hide all done tasks 
