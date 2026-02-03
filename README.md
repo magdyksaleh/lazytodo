@@ -41,12 +41,17 @@ If you run `lazytodo` without arguments, it will automatically create a `todo.md
 
 The application edits the file in place and supports both inline and external editing.
 
+## Search
+
+Press `/` to enter search, type a query, and the list filters to matching tasks. Matches are highlighted and their section headers stay visible. Search is a case-sensitive substring match (no regex). Press `Esc` to clear search.
+
 ## Key Bindings
 - `j/k` or arrows: Navigate
 - `Space`/`Enter`: Toggle task completion (works with visual selection)
 - `dd`: Delete current task
 - `u`: Undo (10-level history)
 - `Ctrl+r`: Redo
+- `/`: Search (filters tasks as you type)
 - `e`: Edit current task in external editor (vim or $EDITOR)
 - `i`: Edit current task inline
 - `o/O`: Insert new task below/above
