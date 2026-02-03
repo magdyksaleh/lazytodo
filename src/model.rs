@@ -8,6 +8,7 @@ use crate::text_input::TextInput;
 pub enum Mode {
     Normal,
     Edit,
+    Search,
 }
 
 // Indicates whether we're updating an existing line or inserting a new one.
@@ -81,6 +82,7 @@ pub struct App {
     pub cursor: usize,
     pub mode: Mode,
     pub text_input: TextInput,
+    pub search_input: TextInput,
     pub input_placeholder: String,
     pub edit_intent: EditIntent,
     pub edit_target: EditTarget,
