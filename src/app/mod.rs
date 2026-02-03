@@ -343,7 +343,7 @@ impl App {
                 self.status_message = "No matches".to_string();
                 return;
             }
-            if !indices.iter().any(|&i| i == self.cursor) {
+            if !indices.contains(&self.cursor) {
                 self.ensure_cursor_visible_in(&indices);
             }
         }
@@ -599,7 +599,7 @@ impl App {
             self.cursor = 0;
             return;
         }
-        if indices.iter().any(|&i| i == self.cursor) {
+        if indices.contains(&self.cursor) {
             return;
         }
         if let Some(&task_idx) = indices.iter().find(|&&i| self.lines[i].is_task()) {
