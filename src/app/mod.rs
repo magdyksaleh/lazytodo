@@ -33,6 +33,7 @@ impl App {
             cursor: 0,
             mode: Mode::Normal,
             text_input: TextInput::new(),
+            search_input: TextInput::new(),
             input_placeholder: "Describe the task".to_string(),
             edit_intent: EditIntent::None,
             edit_target: EditTarget::Task,
@@ -131,6 +132,7 @@ impl App {
         match self.mode {
             Mode::Edit => self.handle_edit_key(key),
             Mode::Normal => self.handle_normal_key(key),
+            Mode::Search => self.handle_search_key(key),
         }
     }
 
@@ -143,10 +145,31 @@ impl App {
             }
         }
 
+        if key == Key::Char('/') {
+            self.pending_d = false;
+            self.clear_selection();
+            self.mode = Mode::Search;
+            if self.search_active() {
+                self.search_input.insert_char('/');
+            } else {
+                self.search_input.reset();
+            }
+            self.ensure_cursor_visible_for_search();
+            return;
+        }
+
         if key == Key::Esc {
+            let mut cleared = false;
+            if self.search_active() {
+                self.search_input.reset();
+                cleared = true;
+            }
             if self.selection_active {
                 self.selection_active = false;
                 self.status_message = "Selection canceled".to_string();
+            }
+            if cleared {
+                self.status_message = "Search cleared".to_string();
             }
             return;
         }
@@ -154,22 +177,10 @@ impl App {
         match key {
             Key::Ctrl('c') => self.should_quit = true,
             Key::Char('q') => self.should_quit = true,
-            Key::Char('j') | Key::Down => {
-                if !self.lines.is_empty() && self.cursor + 1 < self.lines.len() {
-                    self.cursor += 1;
-                }
-            }
-            Key::Char('k') | Key::Up => {
-                if self.cursor > 0 {
-                    self.cursor -= 1;
-                }
-            }
-            Key::Char('g') => self.cursor = 0,
-            Key::Char('G') => {
-                if !self.lines.is_empty() {
-                    self.cursor = self.lines.len() - 1;
-                }
-            }
+            Key::Char('j') | Key::Down => self.move_cursor_visible(1),
+            Key::Char('k') | Key::Up => self.move_cursor_visible(-1),
+            Key::Char('g') => self.move_cursor_to_visible_first(),
+            Key::Char('G') => self.move_cursor_to_visible_last(),
             Key::Char('d') => {
                 self.pending_d = true;
                 self.status_message = "d-".to_string();
@@ -188,6 +199,10 @@ impl App {
             }
             Key::Enter | Key::Char(' ') => self.toggle_tasks(),
             Key::Char('V') | Key::Char('v') => {
+                if self.search_active() {
+                    self.status_message = "Selection disabled while searching".to_string();
+                    return;
+                }
                 if self.lines.is_empty() {
                     return;
                 }
@@ -277,9 +292,60 @@ impl App {
         }
     }
 
+    fn handle_search_key(&mut self, key: Key) {
+        match key {
+            Key::Esc => {
+                self.search_input.reset();
+                self.mode = Mode::Normal;
+                self.status_message = "Search cleared".to_string();
+                self.clear_selection();
+            }
+            Key::Enter => {
+                self.mode = Mode::Normal;
+                self.toggle_tasks();
+            }
+            Key::Char(c) => {
+                self.search_input.insert_char(c);
+                self.ensure_cursor_visible_for_search();
+            }
+            Key::Backspace => {
+                let remaining = self.search_input.value().chars().count();
+                if remaining <= 1 {
+                    self.search_input.reset();
+                    self.mode = Mode::Normal;
+                    self.status_message = "Search cleared".to_string();
+                    return;
+                }
+                self.search_input.backspace();
+                self.ensure_cursor_visible_for_search();
+            }
+            Key::Delete => {
+                self.search_input.delete();
+                self.ensure_cursor_visible_for_search();
+            }
+            Key::Left => self.search_input.move_left(),
+            Key::Right => self.search_input.move_right(),
+            Key::Home => self.search_input.move_home(),
+            Key::End => self.search_input.move_end(),
+            Key::Up => self.move_cursor_visible(-1),
+            Key::Down => self.move_cursor_visible(1),
+            _ => {}
+        }
+    }
+
     fn toggle_tasks(&mut self) {
         if self.lines.is_empty() {
             return;
+        }
+        if self.search_active() && self.mode != Mode::Edit {
+            let indices = self.visible_indices();
+            if indices.is_empty() {
+                self.status_message = "No matches".to_string();
+                return;
+            }
+            if !indices.iter().any(|&i| i == self.cursor) {
+                self.ensure_cursor_visible_in(&indices);
+            }
         }
         let mut count = 0;
         let mut last_toggled: Option<bool> = None;
@@ -479,6 +545,98 @@ impl App {
         }
         if self.selection_anchor >= self.lines.len() {
             self.selection_anchor = self.lines.len() - 1;
+        }
+    }
+
+    pub(crate) fn search_query(&self) -> &str {
+        self.search_input.value()
+    }
+
+    pub(crate) fn search_active(&self) -> bool {
+        !self.search_input.value().is_empty()
+    }
+
+    pub(crate) fn visible_indices(&self) -> Vec<usize> {
+        if self.mode == Mode::Edit || !self.search_active() {
+            return (0..self.lines.len()).collect();
+        }
+        let query = self.search_query();
+        let mut indices = Vec::new();
+        let mut current_section: Option<usize> = None;
+        let mut section_included = false;
+        for (idx, line) in self.lines.iter().enumerate() {
+            match line {
+                LineItem::Section { .. } => {
+                    current_section = Some(idx);
+                    section_included = false;
+                }
+                LineItem::Task(task) => {
+                    if task.text.contains(query) {
+                        if let Some(section_idx) = current_section {
+                            if !section_included {
+                                indices.push(section_idx);
+                                section_included = true;
+                            }
+                        }
+                        indices.push(idx);
+                    }
+                }
+            }
+        }
+        indices
+    }
+
+    pub(crate) fn ensure_cursor_visible_for_search(&mut self) {
+        if self.mode == Mode::Edit || !self.search_active() {
+            return;
+        }
+        let indices = self.visible_indices();
+        self.ensure_cursor_visible_in(&indices);
+    }
+
+    pub(crate) fn ensure_cursor_visible_in(&mut self, indices: &[usize]) {
+        if indices.is_empty() {
+            self.cursor = 0;
+            return;
+        }
+        if indices.iter().any(|&i| i == self.cursor) {
+            return;
+        }
+        if let Some(&task_idx) = indices.iter().find(|&&i| self.lines[i].is_task()) {
+            self.cursor = task_idx;
+        } else {
+            self.cursor = indices[0];
+        }
+    }
+
+    fn move_cursor_visible(&mut self, delta: isize) {
+        let indices = self.visible_indices();
+        if indices.is_empty() {
+            return;
+        }
+        self.ensure_cursor_visible_in(&indices);
+        let Some(pos) = indices.iter().position(|&i| i == self.cursor) else {
+            return;
+        };
+        let new_pos = if delta < 0 {
+            pos.saturating_sub((-delta) as usize)
+        } else {
+            (pos + delta as usize).min(indices.len() - 1)
+        };
+        self.cursor = indices[new_pos];
+    }
+
+    fn move_cursor_to_visible_first(&mut self) {
+        let indices = self.visible_indices();
+        if let Some(&first) = indices.first() {
+            self.cursor = first;
+        }
+    }
+
+    fn move_cursor_to_visible_last(&mut self) {
+        let indices = self.visible_indices();
+        if let Some(&last) = indices.last() {
+            self.cursor = last;
         }
     }
 
