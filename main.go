@@ -39,6 +39,7 @@ func initLogger() {
 }
 
 var checkboxPattern = regexp.MustCompile(`^(\s*)([-*])\s+\[([ xX])\]\s*(.*)$`)
+var sectionPattern = regexp.MustCompile(`^##\s+(.*)$`)
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 const (
@@ -63,6 +64,13 @@ const (
 	editIntentNone editIntent = iota
 	editIntentUpdate
 	editIntentInsert
+)
+
+type editTarget int
+
+const (
+	editTargetTask editTarget = iota
+	editTargetSection
 )
 
 type fileCheckMsg time.Time
@@ -94,8 +102,30 @@ func (t task) line() string {
 	return fmt.Sprintf("%s%s [%s] %s", t.Indent, t.Bullet, mark, t.Text)
 }
 
+type lineKind int
+
+const (
+	lineTask lineKind = iota
+	lineSection
+)
+
+type lineItem struct {
+	Kind         lineKind
+	Task         task
+	SectionTitle string
+}
+
+func (l lineItem) line() string {
+	switch l.Kind {
+	case lineSection:
+		return "## " + l.SectionTitle
+	default:
+		return l.Task.line()
+	}
+}
+
 type undoState struct {
-	tasks  []task
+	lines  []lineItem
 	cursor int
 }
 
@@ -104,11 +134,12 @@ const maxUndoHistory = 10
 // Model is the central application state
 type model struct {
 	filePath        string
-	tasks           []task
+	lines           []lineItem
 	cursor          int
 	mode            mode
 	textInput       textinput.Model
 	editIntent      editIntent
+	editTarget      editTarget
 	editIndex       int
 	insertIndex     int
 	editTemplate    task
@@ -129,7 +160,7 @@ type model struct {
 }
 
 func newModel(path string) (model, error) {
-	t, modTime, err := loadTasks(path)
+	lines, modTime, err := loadLines(path)
 	if err != nil {
 		return model{}, err
 	}
@@ -144,13 +175,14 @@ func newModel(path string) (model, error) {
 	}
 	return model{
 		filePath:        path,
-		tasks:           t,
+		lines:           lines,
 		cursor:          0,
 		mode:            modeNormal,
 		textInput:       ti,
 		editIntent:      editIntentNone,
+		editTarget:      editTargetTask,
 		editIndex:       -1,
-		editTemplate:    defaultTaskTemplate(t),
+		editTemplate:    defaultTaskTemplate(lines),
 		statusMessage:   "",
 		err:             nil,
 		lastModifiedAt:  modTime,
@@ -164,55 +196,71 @@ func newModel(path string) (model, error) {
 	}, nil
 }
 
-func defaultTaskTemplate(tasks []task) task {
-	if len(tasks) == 0 {
+func defaultTaskTemplate(lines []lineItem) task {
+	if len(lines) == 0 {
 		return task{Indent: "", Bullet: "-", Completed: false}
 	}
-	return task{Indent: tasks[0].Indent, Bullet: tasks[0].Bullet, Completed: false}
+	for _, line := range lines {
+		if line.Kind == lineTask {
+			return task{Indent: line.Task.Indent, Bullet: line.Task.Bullet, Completed: false}
+		}
+	}
+	return task{Indent: "", Bullet: "-", Completed: false}
 }
 
-func loadTasks(path string) ([]task, time.Time, error) {
+func loadLines(path string) ([]lineItem, time.Time, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		// File doesn't exist yet - return empty tasks, will be created on first save
-		return []task{}, time.Time{}, nil
+		// File doesn't exist yet - return empty lines, will be created on first save
+		return []lineItem{}, time.Time{}, nil
 	}
 	if err != nil {
 		return nil, time.Time{}, err
 	}
 	lines := strings.Split(strings.ReplaceAll(string(data), "\r", ""), "\n")
-	var tasks []task
+	var items []lineItem
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		sectionMatches := sectionPattern.FindStringSubmatch(line)
+		if len(sectionMatches) > 0 {
+			items = append(items, lineItem{
+				Kind:         lineSection,
+				SectionTitle: sectionMatches[1],
+			})
 			continue
 		}
 		matches := checkboxPattern.FindStringSubmatch(line)
 		if len(matches) == 0 {
 			continue
 		}
-		tasks = append(tasks, task{
-			Indent:    matches[1],
-			Bullet:    matches[2],
-			Completed: strings.EqualFold(matches[3], "x"),
-			Text:      matches[4],
+		items = append(items, lineItem{
+			Kind: lineTask,
+			Task: task{
+				Indent:    matches[1],
+				Bullet:    matches[2],
+				Completed: strings.EqualFold(matches[3], "x"),
+				Text:      matches[4],
+			},
 		})
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return tasks, time.Time{}, err
+		return items, time.Time{}, err
 	}
-	return tasks, info.ModTime(), nil
+	return items, info.ModTime(), nil
 }
 
-func saveTasks(path string, tasks []task) (time.Time, error) {
+func saveLines(path string, lines []lineItem) (time.Time, error) {
 	var builder strings.Builder
-	for i, task := range tasks {
-		builder.WriteString(task.line())
-		if i < len(tasks)-1 {
+	for i, line := range lines {
+		builder.WriteString(line.line())
+		if i < len(lines)-1 {
 			builder.WriteString("\n")
 		}
 	}
-	if len(tasks) > 0 {
+	if len(lines) > 0 {
 		builder.WriteString("\n")
 	}
 	if err := os.WriteFile(path, []byte(builder.String()), 0o644); err != nil {
@@ -225,9 +273,9 @@ func saveTasks(path string, tasks []task) (time.Time, error) {
 	return info.ModTime(), nil
 }
 
-// saveAndSetStatus saves tasks to disk and updates model status accordingly
+// saveAndSetStatus saves lines to disk and updates model status accordingly
 func (m *model) saveAndSetStatus(msg string) {
-	modTime, err := saveTasks(m.filePath, m.tasks)
+	modTime, err := saveLines(m.filePath, m.lines)
 	if err != nil {
 		m.err = err
 		return
@@ -297,18 +345,18 @@ func (m model) handleFileCheck() model {
 		m.pendingReload = true
 		return m
 	}
-	tasks, modTime, err := loadTasks(m.filePath)
+	lines, modTime, err := loadLines(m.filePath)
 	if err != nil {
 		m.err = err
 		return m
 	}
-	m.tasks = tasks
-	m.cursor = clampCursor(m.cursor, len(m.tasks))
+	m.lines = lines
+	m.cursor = clampCursor(m.cursor, len(m.lines))
 	m = m.normalizeSelection()
 	m.lastModifiedAt = modTime
 	m.statusMessage = "Reloaded from disk"
 	m.err = nil
-	m.editTemplate = defaultTaskTemplate(m.tasks)
+	m.editTemplate = defaultTaskTemplate(m.lines)
 	return m
 }
 
@@ -328,7 +376,7 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.pendingD {
 		m.pendingD = false
 		if key == "d" {
-			return m.deleteCurrentTask()
+			return m.deleteCurrentLine()
 		}
 		// Any other key cancels the pending d
 	}
@@ -344,18 +392,18 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 	case "j", "down":
-		if len(m.tasks) > 0 && m.cursor < len(m.tasks)-1 {
+		if len(m.lines) > 0 && m.cursor < len(m.lines)-1 {
 			m.cursor++
 		}
 	case "k", "up":
-		if len(m.tasks) > 0 && m.cursor > 0 {
+		if len(m.lines) > 0 && m.cursor > 0 {
 			m.cursor--
 		}
 	case "g":
 		m.cursor = 0
 	case "G":
-		if len(m.tasks) > 0 {
-			m.cursor = len(m.tasks) - 1
+		if len(m.lines) > 0 {
+			m.cursor = len(m.lines) - 1
 		}
 	case "d":
 		m.pendingD = true
@@ -371,26 +419,37 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.saveAndSetStatus("Redo")
 		}
 	case "enter", " ":
-		if len(m.tasks) == 0 {
+		if len(m.lines) == 0 {
 			break
 		}
 		count := 0
+		var lastToggled *task
 		if m.selectionActive {
 			start, end, ok := m.selectionRange()
 			if ok {
 				for i := start; i <= end; i++ {
-					m.tasks[i].Completed = !m.tasks[i].Completed
+					if m.lines[i].Kind != lineTask {
+						continue
+					}
+					m.lines[i].Task.Completed = !m.lines[i].Task.Completed
+					count++
+					lastToggled = &m.lines[i].Task
 				}
-				count = end - start + 1
 			}
 			m.selectionActive = false
 		} else {
-			m.tasks[m.cursor].Completed = !m.tasks[m.cursor].Completed
-			count = 1
+			if m.lines[m.cursor].Kind == lineTask {
+				m.lines[m.cursor].Task.Completed = !m.lines[m.cursor].Task.Completed
+				count = 1
+				lastToggled = &m.lines[m.cursor].Task
+			}
+		}
+		if count == 0 {
+			break
 		}
 		if count == 1 {
 			state := "Incomplete"
-			if m.tasks[m.cursor].Completed {
+			if lastToggled != nil && lastToggled.Completed {
 				state = "Completed"
 			}
 			m.saveAndSetStatus(fmt.Sprintf("Marked %s", state))
@@ -398,7 +457,7 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.saveAndSetStatus(fmt.Sprintf("Toggled %d tasks", count))
 		}
 	case "V", "shift+v":
-		if len(m.tasks) == 0 {
+		if len(m.lines) == 0 {
 			break
 		}
 		if m.selectionActive {
@@ -412,21 +471,23 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e":
 		return m.startExternalEdit()
 	case "i":
-		m = m.startEditExisting()
+		m = m.startEditCurrent()
 	case "o":
-		m = m.startInsertAt(m.cursor + 1)
+		m = m.startInsertTaskAt(m.cursor + 1)
 	case "O":
-		m = m.startInsertAt(m.cursor)
+		m = m.startInsertTaskAt(m.cursor)
+	case "S":
+		m = m.startInsertSectionAt(m.cursor + 1)
 	case "r":
-		tasks, modTime, err := loadTasks(m.filePath)
+		lines, modTime, err := loadLines(m.filePath)
 		if err != nil {
 			m.err = err
 		} else {
-			m.tasks = tasks
-			m.cursor = clampCursor(m.cursor, len(m.tasks))
+			m.lines = lines
+			m.cursor = clampCursor(m.cursor, len(m.lines))
 			m = m.normalizeSelection()
 			m.lastModifiedAt = modTime
-			m.editTemplate = defaultTaskTemplate(m.tasks)
+			m.editTemplate = defaultTaskTemplate(m.lines)
 			m.statusMessage = "Reloaded"
 			m.err = nil
 		}
@@ -457,29 +518,14 @@ func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m = m.applyCurrentEdit(rawValue)
 			m.saveAndSetStatus("Saved")
 		}
-		m.mode = modeNormal
-		m.editIntent = editIntentNone
-		m.pendingReload = false
-		m.editIndex = -1
-		// Clamp cursor in case we were inserting at the end and cancelled.
-		m.cursor = clampCursor(m.cursor, len(m.tasks))
-		m.textInput.Reset()
-		m.textInput.Blur()
-		m = m.normalizeSelection()
+		m = m.exitEditMode()
 		return m, nil
 	case tea.KeyEnter:
-		// Save current task and create new one below (Obsidian-style)
+		// Save current edit and optionally create a new task below (Obsidian-style)
 		rawValue := m.textInput.Value()
 		if strings.TrimSpace(rawValue) == "" {
 			// Empty task - just exit edit mode, don't save empty
-			m.mode = modeNormal
-			m.editIntent = editIntentNone
-			m.textInput.Reset()
-			m.textInput.Blur()
-			m.editIndex = -1
-			// Clamp cursor if insert was canceled at end-of-list.
-			m.cursor = clampCursor(m.cursor, len(m.tasks))
-			m = m.normalizeSelection()
+			m = m.exitEditMode()
 			return m, nil
 		}
 
@@ -489,21 +535,30 @@ func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Save to disk
 		m.saveAndSetStatus("")
 
-		// Start new task below current position
-		m.insertIndex = m.cursor + 1
-		m.editIndex = m.insertIndex
-		m.editIntent = editIntentInsert
-		// Keep cursor aligned with the insert line.
-		m.cursor = m.editIndex
-		m.textInput.SetValue("")
-		// Keep focus, stay in edit mode
+		if m.editTarget == editTargetTask {
+			// Start new task below current position
+			m.insertIndex = m.cursor + 1
+			m.editIndex = m.insertIndex
+			m.editIntent = editIntentInsert
+			// Keep cursor aligned with the insert line.
+			m.cursor = m.editIndex
+			m.textInput.SetValue("")
+			// Keep focus, stay in edit mode
+			return m, nil
+		}
+
+		m = m.exitEditMode()
 		return m, nil
 	case tea.KeyTab:
-		m = m.changeIndent(1)
-		return m, nil
+		if m.editTarget == editTargetTask {
+			m = m.changeIndent(1)
+			return m, nil
+		}
 	case tea.KeyShiftTab:
-		m = m.changeIndent(-1)
-		return m, nil
+		if m.editTarget == editTargetTask {
+			m = m.changeIndent(-1)
+			return m, nil
+		}
 	}
 	var cmd tea.Cmd
 	m.textInput, cmd = m.textInput.Update(msg)
@@ -513,8 +568,11 @@ func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) changeIndent(delta int) model {
 	// Get the task being edited
 	var currentIndent string
-	if m.editIntent == editIntentUpdate && m.editIndex >= 0 && m.editIndex < len(m.tasks) {
-		currentIndent = m.tasks[m.editIndex].Indent
+	if m.editIntent == editIntentUpdate && m.editIndex >= 0 && m.editIndex < len(m.lines) {
+		if m.lines[m.editIndex].Kind != lineTask {
+			return m
+		}
+		currentIndent = m.lines[m.editIndex].Task.Indent
 	} else if m.editIntent == editIntentInsert {
 		currentIndent = m.editTemplate.Indent
 	} else {
@@ -535,7 +593,7 @@ func (m model) changeIndent(delta int) model {
 
 	// Apply the new indent
 	if m.editIntent == editIntentUpdate {
-		m.tasks[m.editIndex].Indent = newIndent
+		m.lines[m.editIndex].Task.Indent = newIndent
 	} else if m.editIntent == editIntentInsert {
 		m.editTemplate.Indent = newIndent
 	}
@@ -543,9 +601,20 @@ func (m model) changeIndent(delta int) model {
 	return m
 }
 
+func (m model) deleteCurrentLine() (tea.Model, tea.Cmd) {
+	if len(m.lines) == 0 {
+		m.statusMessage = "Nothing to delete"
+		return m, nil
+	}
+	if m.lines[m.cursor].Kind == lineSection {
+		return m.deleteCurrentSection()
+	}
+	return m.deleteCurrentTask()
+}
+
 func (m model) deleteCurrentTask() (tea.Model, tea.Cmd) {
-	if len(m.tasks) == 0 {
-		m.statusMessage = "No tasks to delete"
+	if len(m.lines) == 0 || m.lines[m.cursor].Kind != lineTask {
+		m.statusMessage = "No task to delete"
 		return m, nil
 	}
 
@@ -553,10 +622,10 @@ func (m model) deleteCurrentTask() (tea.Model, tea.Cmd) {
 	m = m.clearSelection()
 
 	// Remove the task at cursor
-	m.tasks = append(m.tasks[:m.cursor], m.tasks[m.cursor+1:]...)
+	m.lines = append(m.lines[:m.cursor], m.lines[m.cursor+1:]...)
 
 	// Adjust cursor if needed
-	m.cursor = clampCursor(m.cursor, len(m.tasks))
+	m.cursor = clampCursor(m.cursor, len(m.lines))
 
 	// Save to file
 	m.saveAndSetStatus("Deleted task")
@@ -564,52 +633,111 @@ func (m model) deleteCurrentTask() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) deleteCurrentSection() (tea.Model, tea.Cmd) {
+	if len(m.lines) == 0 || m.lines[m.cursor].Kind != lineSection {
+		m.statusMessage = "No section to delete"
+		return m, nil
+	}
+
+	m = m.saveUndoState()
+	m = m.clearSelection()
+
+	// Remove the section header only.
+	m.lines = append(m.lines[:m.cursor], m.lines[m.cursor+1:]...)
+
+	// Move cursor to previous line, if possible.
+	m.cursor = clampCursor(m.cursor-1, len(m.lines))
+
+	m.saveAndSetStatus("Deleted section")
+	return m, nil
+}
+
 // applyCurrentEdit applies the current edit to the model without saving or exiting edit mode
 func (m model) applyCurrentEdit(value string) model {
-	switch m.editIntent {
-	case editIntentUpdate:
-		if len(m.tasks) == 0 {
-			return m
+	switch m.editTarget {
+	case editTargetSection:
+		switch m.editIntent {
+		case editIntentUpdate:
+			if len(m.lines) == 0 {
+				return m
+			}
+			if m.editIndex >= 0 && m.editIndex < len(m.lines) && m.lines[m.editIndex].Kind == lineSection {
+				m = m.saveUndoState()
+				m.lines[m.editIndex].SectionTitle = value
+			}
+		case editIntentInsert:
+			newSection := lineItem{
+				Kind:         lineSection,
+				SectionTitle: value,
+			}
+			m.insertIndex = clampIndex(m.insertIndex, len(m.lines))
+			m = m.saveUndoState()
+			m.lines = slices.Insert(m.lines, m.insertIndex, newSection)
+			m.cursor = m.insertIndex
 		}
-		if m.editIndex >= 0 && m.editIndex < len(m.tasks) {
-			m.tasks[m.editIndex].Text = value
+	default:
+		switch m.editIntent {
+		case editIntentUpdate:
+			if len(m.lines) == 0 {
+				return m
+			}
+			if m.editIndex >= 0 && m.editIndex < len(m.lines) && m.lines[m.editIndex].Kind == lineTask {
+				m.lines[m.editIndex].Task.Text = value
+			}
+		case editIntentInsert:
+			newTask := lineItem{
+				Kind: lineTask,
+				Task: task{
+					Indent:    m.editTemplate.Indent,
+					Bullet:    m.editTemplate.Bullet,
+					Completed: false,
+					Text:      value,
+				},
+			}
+			m.insertIndex = clampIndex(m.insertIndex, len(m.lines))
+			m.lines = slices.Insert(m.lines, m.insertIndex, newTask)
+			m.cursor = m.insertIndex
 		}
-	case editIntentInsert:
-		newTask := task{
-			Indent:    m.editTemplate.Indent,
-			Bullet:    m.editTemplate.Bullet,
-			Completed: false,
-			Text:      value,
-		}
-		m.insertIndex = clampIndex(m.insertIndex, len(m.tasks))
-		m.tasks = slices.Insert(m.tasks, m.insertIndex, newTask)
-		m.cursor = m.insertIndex
 	}
+	return m
+}
+
+// exitEditMode resets transient edit state without saving.
+func (m model) exitEditMode() model {
+	m.mode = modeNormal
+	m.editIntent = editIntentNone
+	m.editTarget = editTargetTask
+	m.pendingReload = false
+	m.editIndex = -1
+	// Clamp cursor in case we were inserting at the end and cancelled.
+	m.cursor = clampCursor(m.cursor, len(m.lines))
+	m.textInput.Reset()
+	m.textInput.Blur()
+	m = m.normalizeSelection()
 	return m
 }
 
 func (m model) finishEdit() (tea.Model, tea.Cmd) {
 	rawValue := m.textInput.Value()
 	if strings.TrimSpace(rawValue) == "" {
-		m.statusMessage = "Cannot save empty task"
+		if m.editTarget == editTargetSection {
+			m.statusMessage = "Cannot save empty section"
+		} else {
+			m.statusMessage = "Cannot save empty task"
+		}
 		return m, nil
 	}
 	m = m.applyCurrentEdit(rawValue)
 	m.saveAndSetStatus("Saved")
-	m.mode = modeNormal
-	m.editIntent = editIntentNone
-	m.textInput.Reset()
-	m.textInput.Blur()
-	m.editIndex = -1
+	m = m.exitEditMode()
 	if m.pendingReload {
 		m.pendingReload = false
 	}
-	m = m.normalizeSelection()
 	return m, nil
 }
 
 func (m model) startExternalEdit() (tea.Model, tea.Cmd) {
-	if len(m.tasks) == 0 {
+	if len(m.lines) == 0 || m.lines[m.cursor].Kind != lineTask {
 		return m, nil
 	}
 	m = m.clearSelection()
@@ -624,7 +752,7 @@ func (m model) startExternalEdit() (tea.Model, tea.Cmd) {
 	tmpPath := tmpFile.Name()
 
 	// Write current task text to the temp file
-	if _, err := tmpFile.WriteString(m.tasks[m.cursor].Text); err != nil {
+	if _, err := tmpFile.WriteString(m.lines[m.cursor].Task.Text); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
 		m.err = err
@@ -668,8 +796,8 @@ func (m model) handleEditorFinished(msg editorFinishedMsg) (tea.Model, tea.Cmd) 
 	}
 
 	// Update the task
-	if m.externalEditIdx >= 0 && m.externalEditIdx < len(m.tasks) {
-		m.tasks[m.externalEditIdx].Text = newText
+	if m.externalEditIdx >= 0 && m.externalEditIdx < len(m.lines) && m.lines[m.externalEditIdx].Kind == lineTask {
+		m.lines[m.externalEditIdx].Task.Text = newText
 		m.saveAndSetStatus("Saved")
 	}
 
@@ -677,14 +805,26 @@ func (m model) handleEditorFinished(msg editorFinishedMsg) (tea.Model, tea.Cmd) 
 	return m, nil
 }
 
-func (m model) startEditExisting() model {
-	if len(m.tasks) == 0 {
+func (m model) startEditCurrent() model {
+	if len(m.lines) == 0 {
+		return m
+	}
+	if m.lines[m.cursor].Kind == lineSection {
+		return m.startEditSection()
+	}
+	return m.startEditTask()
+}
+
+func (m model) startEditTask() model {
+	if len(m.lines) == 0 || m.lines[m.cursor].Kind != lineTask {
 		return m
 	}
 	m = m.clearSelection()
 	m.mode = modeEdit
 	m.editIntent = editIntentUpdate
-	m.textInput.SetValue(m.tasks[m.cursor].Text)
+	m.editTarget = editTargetTask
+	m.textInput.Placeholder = "Describe the task"
+	m.textInput.SetValue(m.lines[m.cursor].Task.Text)
 	m.textInput.CursorEnd()
 	m.textInput.Focus()
 	m = m.applyEditorWidth()
@@ -693,22 +833,42 @@ func (m model) startEditExisting() model {
 	return m
 }
 
-func (m model) startInsertAt(index int) model {
+func (m model) startEditSection() model {
+	if len(m.lines) == 0 || m.lines[m.cursor].Kind != lineSection {
+		return m
+	}
+	m = m.clearSelection()
+	m.mode = modeEdit
+	m.editIntent = editIntentUpdate
+	m.editTarget = editTargetSection
+	m.textInput.Placeholder = "Section title"
+	m.textInput.SetValue(m.lines[m.cursor].SectionTitle)
+	m.textInput.CursorEnd()
+	m.textInput.Focus()
+	m = m.applyEditorWidth()
+	m.editIndex = m.cursor
+	m.statusMessage = "Editing section"
+	return m
+}
+
+func (m model) startInsertTaskAt(index int) model {
 	template := m.editTemplate
-	if len(m.tasks) > 0 && m.cursor >= 0 && m.cursor < len(m.tasks) {
-		template = task{Indent: m.tasks[m.cursor].Indent, Bullet: m.tasks[m.cursor].Bullet}
+	if len(m.lines) > 0 && m.cursor >= 0 && m.cursor < len(m.lines) && m.lines[m.cursor].Kind == lineTask {
+		template = task{Indent: m.lines[m.cursor].Task.Indent, Bullet: m.lines[m.cursor].Task.Bullet}
 	}
 	m = m.clearSelection()
 	m.mode = modeEdit
 	m.editIntent = editIntentInsert
-	if len(m.tasks) == 0 {
+	m.editTarget = editTargetTask
+	if len(m.lines) == 0 {
 		m.insertIndex = 0
 	} else {
-		m.insertIndex = clampIndex(index, len(m.tasks))
+		m.insertIndex = clampIndex(index, len(m.lines))
 	}
 	m.editIndex = m.insertIndex
 	// Move cursor to the insert line so the highlight reflects the edit focus.
 	m.cursor = m.editIndex
+	m.textInput.Placeholder = "Describe the task"
 	m.textInput.SetValue("")
 	m.textInput.Focus()
 	m = m.applyEditorWidth()
@@ -717,28 +877,65 @@ func (m model) startInsertAt(index int) model {
 	return m
 }
 
+func (m model) startInsertSectionAt(index int) model {
+	m = m.clearSelection()
+	m.mode = modeEdit
+	m.editIntent = editIntentInsert
+	m.editTarget = editTargetSection
+	if len(m.lines) == 0 {
+		m.insertIndex = 0
+	} else {
+		m.insertIndex = clampIndex(index, len(m.lines))
+	}
+	m.editIndex = m.insertIndex
+	m.cursor = m.editIndex
+	m.textInput.Placeholder = "Section title"
+	m.textInput.SetValue("")
+	m.textInput.Focus()
+	m = m.applyEditorWidth()
+	m.statusMessage = "New section"
+	return m
+}
+
 func (m model) View() string {
 	var b strings.Builder
 	b.WriteString(m.renderHeader())
-	showEmptyState := len(m.tasks) == 0 && !(m.mode == modeEdit && m.editIntent == editIntentInsert)
+	showEmptyState := m.countTasks() == 0 && !(m.mode == modeEdit && m.editIntent == editIntentInsert && m.editTarget == editTargetTask)
 	if showEmptyState {
 		b.WriteString("No tasks found. Press 'o' to create one.\n")
 	}
-	total := len(m.tasks)
+	total := len(m.lines)
 	for i := 0; i < total; i++ {
 		// Render a phantom insert row before the real task so it doesn't get hidden.
 		if m.mode == modeEdit && m.editIntent == editIntentInsert && i == m.editIndex {
-			b.WriteString(m.renderEditorLine(m.editTemplate, i))
+			if m.editTarget == editTargetSection {
+				b.WriteString(m.renderSectionEditorLine(i))
+			} else {
+				b.WriteString(m.renderEditorLine(m.editTemplate, i))
+			}
 		}
 		if m.mode == modeEdit && m.editIntent == editIntentUpdate && i == m.editIndex {
-			b.WriteString(m.renderEditorLine(m.tasks[i], i))
+			if m.editTarget == editTargetSection {
+				b.WriteString(m.renderSectionEditorLine(i))
+			} else {
+				b.WriteString(m.renderEditorLine(m.lines[i].Task, i))
+			}
 			continue
 		}
 		suppressCursor := m.mode == modeEdit && m.editIntent == editIntentInsert && i == m.editIndex
-		b.WriteString(m.renderTaskLine(m.tasks[i], i, suppressCursor))
+		switch m.lines[i].Kind {
+		case lineSection:
+			b.WriteString(m.renderSectionLine(m.lines[i], i, suppressCursor))
+		default:
+			b.WriteString(m.renderTaskLine(m.lines[i].Task, i, suppressCursor))
+		}
 	}
 	if m.mode == modeEdit && m.editIntent == editIntentInsert && m.editIndex == total {
-		b.WriteString(m.renderEditorLine(m.editTemplate, m.editIndex))
+		if m.editTarget == editTargetSection {
+			b.WriteString(m.renderSectionEditorLine(m.editIndex))
+		} else {
+			b.WriteString(m.renderEditorLine(m.editTemplate, m.editIndex))
+		}
 	}
 	b.WriteString(m.renderFooter())
 	return m.padViewToWindow(b.String())
@@ -776,6 +973,15 @@ func (m model) renderEditorLine(t task, index int) string {
 	return m.formatLine(index, true, false, content)
 }
 
+func (m model) renderSectionLine(line lineItem, index int, suppressCursor bool) string {
+	body := fmt.Sprintf("\033[1m%s\033[0m", line.SectionTitle)
+	return m.formatSectionLine(index, suppressCursor, body)
+}
+
+func (m model) renderSectionEditorLine(index int) string {
+	prefix := "  >"
+	return prefix + m.textInput.View() + "\n"
+}
 func (m model) renderMarkdownLine(raw string) string {
 	if m.renderer == nil {
 		return raw
@@ -867,6 +1073,19 @@ func (m model) formatLine(index int, editing bool, suppressCursor bool, body str
 	return b.String()
 }
 
+func (m model) formatSectionLine(index int, suppressCursor bool, body string) string {
+	cursorChar := " "
+	if !suppressCursor && index == m.cursor {
+		cursorChar = ">"
+	}
+	isSelected := m.isSelected(index)
+	prefix := fmt.Sprintf("%s  ", cursorChar)
+	if isSelected {
+		return highlightOn + prefix + stripANSI(body) + clearToEOL + highlightOff + "\n"
+	}
+	return prefix + body + "\n"
+}
+
 // stripANSI removes ANSI escape codes from a string
 func stripANSI(s string) string {
 	return ansiEscapePattern.ReplaceAllString(s, "")
@@ -879,18 +1098,27 @@ func (m model) renderHeader() string {
 func (m model) renderFooter() string {
 	// Count completed and open tasks
 	completed := 0
-	for _, t := range m.tasks {
-		if t.Completed {
+	totalTasks := 0
+	for _, line := range m.lines {
+		if line.Kind != lineTask {
+			continue
+		}
+		totalTasks++
+		if line.Task.Completed {
 			completed++
 		}
 	}
-	open := len(m.tasks) - completed
+	open := totalTasks - completed
 
 	var parts []string
 	if m.mode == modeEdit {
-		parts = append(parts, "Tab/S-Tab indent", "Esc save & exit", "Enter new below")
+		if m.editTarget == editTargetSection {
+			parts = append(parts, "Esc save & exit", "Enter save")
+		} else {
+			parts = append(parts, "Tab/S-Tab indent", "Esc save & exit", "Enter new below")
+		}
 	} else {
-		parts = append(parts, "j/k move", "space toggle", "dd del", "u undo", "^r redo", "e vim", "i inline", "o/O new", "q quit")
+		parts = append(parts, "j/k move", "space toggle", "dd del", "u undo", "^r redo", "e vim", "i inline", "o/O new", "S section", "q quit")
 		if m.selectionActive {
 			parts = append(parts, "Esc cancel selection")
 		}
@@ -907,6 +1135,16 @@ func (m model) renderFooter() string {
 		status += "\nError: " + m.err.Error()
 	}
 	return "\n" + status + "\n"
+}
+
+func (m model) countTasks() int {
+	count := 0
+	for _, line := range m.lines {
+		if line.Kind == lineTask {
+			count++
+		}
+	}
+	return count
 }
 
 func clampCursor(cursor int, length int) int {
@@ -932,15 +1170,15 @@ func clampIndex(index, length int) int {
 	return index
 }
 
-func copyTasks(tasks []task) []task {
-	cp := make([]task, len(tasks))
-	copy(cp, tasks)
+func copyLines(lines []lineItem) []lineItem {
+	cp := make([]lineItem, len(lines))
+	copy(cp, lines)
 	return cp
 }
 
 func (m model) saveUndoState() model {
 	state := undoState{
-		tasks:  copyTasks(m.tasks),
+		lines:  copyLines(m.lines),
 		cursor: m.cursor,
 	}
 	m.undoStack = append(m.undoStack, state)
@@ -959,7 +1197,7 @@ func (m model) undo() model {
 	}
 	// Save current state to redo stack
 	redoState := undoState{
-		tasks:  copyTasks(m.tasks),
+		lines:  copyLines(m.lines),
 		cursor: m.cursor,
 	}
 	m.redoStack = append(m.redoStack, redoState)
@@ -969,8 +1207,8 @@ func (m model) undo() model {
 	state := m.undoStack[lastIdx]
 	m.undoStack = m.undoStack[:lastIdx]
 
-	m.tasks = state.tasks
-	m.cursor = clampCursor(state.cursor, len(m.tasks))
+	m.lines = state.lines
+	m.cursor = clampCursor(state.cursor, len(m.lines))
 	m.statusMessage = "Undo"
 	return m
 }
@@ -982,7 +1220,7 @@ func (m model) redo() model {
 	}
 	// Save current state to undo stack
 	undoState := undoState{
-		tasks:  copyTasks(m.tasks),
+		lines:  copyLines(m.lines),
 		cursor: m.cursor,
 	}
 	m.undoStack = append(m.undoStack, undoState)
@@ -992,8 +1230,8 @@ func (m model) redo() model {
 	state := m.redoStack[lastIdx]
 	m.redoStack = m.redoStack[:lastIdx]
 
-	m.tasks = state.tasks
-	m.cursor = clampCursor(state.cursor, len(m.tasks))
+	m.lines = state.lines
+	m.cursor = clampCursor(state.cursor, len(m.lines))
 	m.statusMessage = "Redo"
 	return m
 }
@@ -1040,11 +1278,11 @@ func (m model) applyEditorWidth() model {
 }
 
 func (m model) selectionRange() (int, int, bool) {
-	if !m.selectionActive || len(m.tasks) == 0 {
+	if !m.selectionActive || len(m.lines) == 0 {
 		return 0, 0, false
 	}
-	anchor := clampCursor(m.selectionAnchor, len(m.tasks))
-	cursor := clampCursor(m.cursor, len(m.tasks))
+	anchor := clampCursor(m.selectionAnchor, len(m.lines))
+	cursor := clampCursor(m.cursor, len(m.lines))
 	if anchor <= cursor {
 		return anchor, cursor, true
 	}
@@ -1070,15 +1308,15 @@ func (m model) normalizeSelection() model {
 	if !m.selectionActive {
 		return m
 	}
-	if len(m.tasks) == 0 {
+	if len(m.lines) == 0 {
 		m.selectionActive = false
 		return m
 	}
 	if m.selectionAnchor < 0 {
 		m.selectionAnchor = 0
 	}
-	if m.selectionAnchor >= len(m.tasks) {
-		m.selectionAnchor = len(m.tasks) - 1
+	if m.selectionAnchor >= len(m.lines) {
+		m.selectionAnchor = len(m.lines) - 1
 	}
 	return m
 }
@@ -1108,7 +1346,7 @@ func main() {
 	}
 	m, err := newModel(abs)
 	if err != nil {
-		fmt.Println("failed to load tasks:", err)
+		fmt.Println("failed to load file:", err)
 		os.Exit(1)
 	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
