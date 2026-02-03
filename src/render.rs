@@ -43,7 +43,11 @@ impl App {
 
         let footer = self.render_footer();
         let header_lines = count_lines(&header);
-        let empty_lines = if show_empty_state || show_no_matches { 1 } else { 0 };
+        let empty_lines = if show_empty_state || show_no_matches {
+            1
+        } else {
+            0
+        };
         let footer_lines = count_lines(&footer);
         let available_items = if self.window_height == 0 {
             usize::MAX
@@ -244,10 +248,7 @@ impl App {
         }
 
         let search_line = if self.mode == Mode::Search {
-            format!(
-                "/{}",
-                self.search_input.view("search", self.editor_width())
-            )
+            format!("/{}", self.search_input.view("search", self.editor_width()))
         } else if self.search_active() && self.mode != Mode::Edit {
             format!("/{}", self.search_query())
         } else {
