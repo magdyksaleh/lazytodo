@@ -1,8 +1,8 @@
-# Binary
-todui
+# Rust
+/target/
 
-# Go module cache
-.gomodcache/
+# Binary
+lazytodo
 
 # IDE/editor
 .idea/
@@ -15,10 +15,8 @@ todui
 .DS_Store
 Thumbs.db
 
-# Test artifacts
-*.test
-coverage.out
-
+# Logs
 lazytodo.log
 
 .claude/
+target/
