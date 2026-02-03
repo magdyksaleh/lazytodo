@@ -1,10 +1,10 @@
 # lazytodo
 
-lazytodo is a terminal todo manager for Markdown checkbox lists. It lets you navigate, toggle, and edit tasks inside a TUI powered by Bubble Tea.
+lazytodo is a terminal todo manager for Markdown checkbox lists. It lets you navigate, toggle, and edit tasks inside a TUI built in Rust with crossterm.
 
 It's inspired by Obsidian to work over a markdown file in your repo that you can check in.
 
-Uses basic vim keybindings. 
+Uses basic vim keybindings.
 
 ![Screenshot of lazytodo TUI](example.png)
 
@@ -21,17 +21,20 @@ Pass `--version vX.Y.Z` to lock to a specific tag or `--install-dir` for a custo
 ## Build from source
 
 ```bash
-go build -o lazytodo .
+cargo build --release
 ```
 
 ## Run
 
 ```bash
 # Run with a specific file
-./lazytodo path/to/todo.md
+./target/release/lazytodo path/to/todo.md
+
+# Or run via cargo
+cargo run -- path/to/todo.md
 
 # Run without arguments - creates/opens todo.md in current directory
-./lazytodo
+./target/release/lazytodo
 ```
 
 If you run `lazytodo` without arguments, it will automatically create a `todo.md` file in the current directory if one doesn't already exist.
@@ -47,6 +50,7 @@ The application edits the file in place and supports both inline and external ed
 - `e`: Edit current task in external editor (vim or $EDITOR)
 - `i`: Edit current task inline
 - `o/O`: Insert new task below/above
+- `S`: Insert a new section below
 - `V`: Start visual line selection
 - `g/G`: Jump to first/last task
 - `r`: Reload file
@@ -56,5 +60,5 @@ The application edits the file in place and supports both inline and external ed
 
 - `Tab`: Indent task (3 levels max)
 - `Shift+Tab`: Unindent task
-- `Enter`: Save
-- `Esc`: Cancel
+- `Enter`: Save (tasks continue with a new task below)
+- `Esc`: Save & exit (or cancel if empty)

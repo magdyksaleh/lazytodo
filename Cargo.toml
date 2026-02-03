@@ -1,0 +1,14 @@
+[package]
+name = "lazytodo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crossterm = "0.27"
+log = "0.4"
+once_cell = "1.19"
+pulldown-cmark = "0.12"
+regex = "1.10"
+simplelog = "0.12"
+tempfile = "3.10"
+unicode-width = "0.1"

@@ -13,22 +13,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          go-version-file: go.mod
+          components: rustfmt, clippy
 
-      - name: Go fmt check
-        run: |
-          fmt_result=$(gofmt -l .)
-          if [ -n "$fmt_result" ]; then
-            echo "Go files need formatting:" >&2
-            echo "$fmt_result" >&2
-            exit 1
-          fi
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
-      - name: Go vet
-        run: go vet ./...
+      - name: Rust fmt check
+        run: cargo fmt -- --check
+
+      - name: Rust clippy
+        run: cargo clippy -- -D warnings
 
       - name: Run tests
-        run: go test ./...
+        run: cargo test

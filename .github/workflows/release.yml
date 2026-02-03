@@ -10,26 +10,95 @@ permissions:
   contents: write
 
 jobs:
-  goreleaser:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_os: linux
+            archive_arch: amd64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive_os: linux
+            archive_arch: arm64
+            cross: true
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive_os: darwin
+            archive_arch: amd64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_os: darwin
+            archive_arch: arm64
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+      - name: Set version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
 
-      - name: Verify tests
-        run: go test ./...
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          version: latest
-          args: release --clean
+          targets: ${{ matrix.target }}
+
+      - name: Install cross toolchain (linux arm64)
+        if: ${{ matrix.cross }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          archive="lazytodo_${VERSION}_${{ matrix.archive_os }}_${{ matrix.archive_arch }}.tar.gz"
+          cp "target/${{ matrix.target }}/release/lazytodo" lazytodo
+          tar -czf "$archive" lazytodo
+          rm -f lazytodo
+          echo "ARCHIVE=$archive" >> $GITHUB_ENV
+
+      - name: Checksum
+        run: |
+          python3 - <<'PY'
+          import hashlib, pathlib, os
+          archive = pathlib.Path(os.environ['ARCHIVE'])
+          h = hashlib.sha256(archive.read_bytes()).hexdigest()
+          checksum_path = archive.with_suffix(archive.suffix + '.sha256')
+          checksum_path.write_text(f"{h}  {archive.name}\n")
+          PY
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive_os }}-${{ matrix.archive_arch }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Collect release assets
+        run: |
+          find dist -name '*.tar.gz' -exec cp {} . \;
+          find dist -name '*.sha256' -exec cat {} \; > checksums.txt
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tar.gz
+            checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
